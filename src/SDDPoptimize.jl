@@ -16,6 +16,13 @@ Solve SDDP algorithm and return estimation of bellman functions.
 Alternate forward and backward phase till the stopping criterion is
 fulfilled.
 
+# Usage
+`V, pbs, stats = solve_SDDP(model::SPModel, param::SDDPparameters, display=0::Int64)`
+
+or specify directly value functions `V` in arguments to use preexisting approximation:
+
+`V, pbs, stats = solve_SDDP(model::SPModel, param::SDDPparameters, V::Vector{PolyhedralFunction}, display=0::Int64)`
+
 # Arguments
 * `model::SPmodel`:
     the stochastic problem we want to optimize
@@ -32,8 +39,9 @@ fulfilled.
 * `problems::Array{JuMP.Model}`:
     the collection of linear problems used to approximate
     each value function
-* `count_callsolver::Int64`:
-    number of times the solver has been called
+* `sddp_stat::SDDPStat`:
+    Statistics about the evolution of lower bound, the number
+    of calls to solver, and so on.
 
 """
 function solve_SDDP(model::SPModel, param::SDDPparameters, display=0::Int64)
@@ -51,6 +59,71 @@ function solve_SDDP(model::SPModel, param::SDDPparameters, V::Vector{PolyhedralF
     problems = hotstart_SDDP(model, param, V)
     sddp_stats = run_SDDP!(model, param, V, problems, display)
     return V, problems, sddp_stats
+end
+
+
+"""
+Solve SDDP algorithm and return estimation of bellman functions.
+
+# Usage
+
+`V, pbs, stats = solve_SDDP(model::SPModel, solver; display=0::Int64, passnumber=10, gap=0., max_iterations=20, prune_cuts=0, compute_ub=0, montecarlo=1000)`
+
+# Arguments
+* `model::SPmodel`:
+    the stochastic problem we want to optimize
+* `solver`:
+    Mathprogbase interface with the solver to use
+* `display::Int64`:
+    Default is `0`
+    If non null, display progression in terminal every
+    `n` iterations, where `n` is number specified by display.
+* `passnumber::Int64`: Default is 10
+    Number of forward pass to compute in SDDP
+* `gap::Float64`: Default is 0.
+    Admissible gap between lower-bound and upper-bound
+    This parameter is used only if upper-bound is computed
+* `max_iterations::Int64`: Default is 20
+    Maximum number of iterations for SDDP. If stopping
+    criteria is not fulfilled after `n` iterations, then
+    the algorithm stop
+* `prune_cuts::Int64`: Default is 0
+    If specified, perform exact cuts pruning every `n`
+    iterations, with `n=prune_cuts`
+* `compute_ub::Int64`: Default is 0
+    If greater than 0, compute upper-bound every `n` iterations
+    with a Monte-Carlo approximation.
+    If `compute_ub=-1`, then compute estimation of upper-bound
+    only at the end of the algorithm
+* `montecarlo::Int64`: Default is 1000
+    Number of points used to approximate upper-bound with
+    Monte-Carlo.
+
+# Returns
+* `V::Array{PolyhedralFunction}`:
+    the collection of approximation of the bellman functions
+* `problems::Array{JuMP.Model}`:
+    the collection of linear problems used to approximate
+    each value function
+* `sddp_stat::SDDPStat`:
+    Statistics about the evolution of lower bound, the number
+    of calls to solver, and so on.
+
+"""
+function solve_SDDP(model::SPModel, solver; display=0::Int64,
+                    passnumber=10, gap=0., max_iterations=20,
+                    prune_cuts=0, compute_ub=0, montecarlo=1000)
+    params = SDDPparameters(solver, passnumber, gap, max_iterations, prune_cuts,
+                            compute_ub, montecarlo)
+    return solve_SDDP(model, params, display)
+end
+
+function solve_SDDP(model::SPModel, V::Array{PolyhedralFunction}, solver;
+                    display=0::Int64, passnumber=10, gap=0., max_iterations=20,
+                    prune_cuts=0, compute_ub=0, montecarlo=1000)
+    params = SDDPparameters(solver, passnumber, gap, max_iterations, prune_cuts,
+                            compute_ub, montecarlo)
+    return solve_SDDP(model, params, V, display)
 end
 
 
