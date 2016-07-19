@@ -32,8 +32,6 @@ problem with respect to the initial state x
     current starting state
 * `xi::Array{float}`:
     current noise value
-* `init::Bool`:
-    If specified, approximate future cost as 0
 
 # Returns
 * `Bool`:
@@ -46,8 +44,8 @@ function solve_one_step_one_alea(model,
                                  m::JuMP.Model,
                                  t::Int64,
                                  xt::Vector{Float64},
-                                 xi::Vector{Float64},
-                                 init=false::Bool)
+                                 xi::Vector{Float64};
+                                 xp=0.)
     # Get var defined in JuMP.model:
     u = getvariable(m, :u)
     w = getvariable(m, :w)
@@ -55,6 +53,10 @@ function solve_one_step_one_alea(model,
 
     # Update value of w:
     setvalue(w, xi)
+    if isa(xp, Vector{Float64})
+        xnp = getvariable(m, :xp)
+        setvalue(xnp, xp)
+    end
 
     # Update constraint x == xt
     for i in 1:model.dimStates

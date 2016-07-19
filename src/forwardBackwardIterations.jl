@@ -40,8 +40,11 @@ scenario according to the current value functions.
 function forward_simulations(model::SPModel,
                             param::SDDPparameters,
                             solverProblems::Vector{JuMP.Model},
+                            stocks,
                             xi::Array{Float64})
 
+
+    acceleration = (param.ρ_regularization > 0.)
     callsolver::Int = 0
 
     T = model.stageNumber
@@ -56,15 +59,9 @@ function forward_simulations(model::SPModel,
         end
      end
 
-    stocks = zeros(T, nb_forward, model.dimStates)
     # We got T - 1 control, as terminal state is included into the total number
     # of stages.
     controls = zeros(T - 1, nb_forward, model.dimControls)
-
-    # Set first value of stocks equal to x0:
-    for k in 1:nb_forward
-        stocks[1, k, :] = model.initialState
-    end
 
     costs = zeros(nb_forward)
 
@@ -75,13 +72,27 @@ function forward_simulations(model::SPModel,
             alea_t = collect(xi[t, k, :])
 
             callsolver += 1
-            status, nextstep = solve_one_step_one_alea(
-                                        model,
-                                        param,
-                                        solverProblems[t],
-                                        t,
-                                        state_t,
-                                        alea_t)
+
+            if ~acceleration
+                status, nextstep = solve_one_step_one_alea(
+                                            model,
+                                            param,
+                                            solverProblems[t],
+                                            t,
+                                            state_t,
+                                            alea_t)
+            else
+                stocks_pre = collect(stocks[t+1, k, :])
+                status, nextstep = solve_one_step_one_alea(
+                                            model,
+                                            param,
+                                            solverProblems[t],
+                                            t,
+                                            state_t,
+                                            alea_t,
+                                            xp=stocks_pre)
+            end
+
             if status
                 stocks[t+1, k, :] = nextstep.next_state
                 opt_control = nextstep.optimal_control
@@ -91,13 +102,15 @@ function forward_simulations(model::SPModel,
                     costs[k] += nextstep.cost_to_go
                 end
             else
+                println(solverProblems[t])
+                break
+
                 stocks[t+1, k, :] = state_t
             end
         end
     end
-    return costs, stocks, controls, callsolver
+    return costs, controls, callsolver
 end
-
 
 
 """

@@ -72,6 +72,8 @@ function run_SDDP!(model::SPModel,
         upperbound_scenarios = simulate_scenarios(model.noises, param.monteCarloSize)
     end
 
+    stockTrajectories = build_trajectories(model, param.forwardPassNumber)
+
     upb = Inf
     costs = nothing
     stopping_test::Bool = false
@@ -87,11 +89,17 @@ function run_SDDP!(model::SPModel,
         noise_scenarios = simulate_scenarios(model.noises, param.forwardPassNumber)
 
         # Forward pass
-        _, stockTrajectories,_,callsolver_forward = forward_simulations(model,
+        if param.ρ_regularization > 0.
+            ρk = (param.ρ_regularization)^iteration_count
+            problems_forward = hotstart_SDDP(model, param, V, ρk=ρk)
+        else
+            problems_forward = problems
+        end
+        callsolver_forward = forward_simulations(model,
                             param,
-                            problems,
-                            noise_scenarios)
-
+                            problems_forward,
+                            stockTrajectories,
+                            noise_scenarios)[end]
 
         # Backward pass
         callsolver_backward = backward_pass!(model,
@@ -188,9 +196,9 @@ function estimate_upper_bound(model::SPModel, param::SDDPparameters,
                                 V::Vector{PolyhedralFunction},
                                 problem::Vector{JuMP.Model},
                                 n_simulation=1000::Int)
-
+    stocks = build_trajectories(model, n_simulation)
     aleas = simulate_scenarios(model.noises, n_simulation)
-    costs, stockTrajectories, _ = forward_simulations(model, param, problem, aleas)
+    costs = forward_simulations(model, param, problem, stocks, aleas)[1]
     return upper_bound(costs), costs
 end
 
@@ -198,7 +206,8 @@ end
 function estimate_upper_bound(model::SPModel, param::SDDPparameters,
                                 aleas::Array{Float64, 3},
                                 problem::Vector{JuMP.Model})
-    costs = forward_simulations(model, param, problem, aleas)[1]
+    stocks = build_trajectories(model, param.forwardPassNumber)
+    costs = forward_simulations(model, param, problem, stocks, aleas)[1]
     return upper_bound(costs), costs
 end
 
@@ -206,6 +215,14 @@ end
 """Build a collection of cuts initialized at 0"""
 function get_null_value_functions_array(model::SPModel)
     return [PolyhedralFunction(zeros(1), zeros(1, model.dimStates), 1) for i in 1:model.stageNumber]
+end
+
+function build_trajectories(model, nscenarios)
+    stocks = zeros(model.stageNumber, nscenarios, model.dimStates)
+    for i in 1:model.dimStates
+        stocks[:, :, i] = model.initialState[i]
+    end
+    return stocks
 end
 
 
@@ -251,50 +268,56 @@ linear problem.
 # Return
 * `Array::JuMP.Model`:
 """
-function build_models(model::SPModel, param::SDDPparameters)
+function build_models(model::SPModel, param::SDDPparameters; ρ=0.)
+    return JuMP.Model[build_lpmodel(model, param, t, ρ=ρ) for t = 1:model.stageNumber-1]
+end
 
-    models = Vector{JuMP.Model}(model.stageNumber-1)
 
-    for t = 1:model.stageNumber-1
-        m = Model(solver=param.solver)
+function build_lpmodel(model::SPModel, param::SDDPparameters, t; ρ=0.)
+    m = Model(solver=param.solver)
 
-        nx = model.dimStates
-        nu = model.dimControls
-        nw = model.dimNoises
+    nx = model.dimStates
+    nu = model.dimControls
+    nw = model.dimNoises
 
-        @variable(m,  model.xlim[i][1] <= x[i=1:nx] <= model.xlim[i][2])
-        @variable(m,  model.ulim[i][1] <= u[i=1:nu] <=  model.ulim[i][2])
-        @variable(m,  model.xlim[i][1] <= xf[i=1:nx]<= model.xlim[i][2])
-        @variable(m, alpha)
+    @variable(m,  model.xlim[i][1] <= x[i=1:nx] <= model.xlim[i][2])
+    @variable(m,  model.ulim[i][1] <= u[i=1:nu] <=  model.ulim[i][2])
+    @variable(m,  model.xlim[i][1] <= xf[i=1:nx]<= model.xlim[i][2])
+    @variable(m, alpha)
 
-        @variable(m, w[1:nw] == 0)
-        m.ext[:cons] = @constraint(m, state_constraint, x .== 0)
+    @variable(m, w[1:nw] == 0)
+    m.ext[:cons] = @constraint(m, state_constraint, x .== 0)
 
-        @constraint(m, xf .== model.dynamics(t, x, u, w))
+    @constraint(m, xf .== model.dynamics(t, x, u, w))
 
-        if model.equalityConstraints != nothing
-            @constraint(m, model.equalityConstraints(t, x, u, w) .== 0)
-        end
-        if model.inequalityConstraints != nothing
-            @constraint(m, model.inequalityConstraints(t, x, u, w) .<= 0)
-        end
-
-        if typeof(model) == LinearDynamicLinearCostSPmodel
-            @objective(m, Min, model.costFunctions(t, x, u, w) + alpha)
-
-        elseif typeof(model) == PiecewiseLinearCostSPmodel
-            @variable(m, cost)
-
-            for i in 1:length(model.costFunctions)
-                @constraint(m, cost >= model.costFunctions[i](t, x, u, w))
-            end
-            @objective(m, Min, cost + alpha)
-        end
-
-        models[t] = m
-
+    if model.equalityConstraints != nothing
+        @constraint(m, model.equalityConstraints(t, x, u, w) .== 0)
     end
-    return models
+    if model.inequalityConstraints != nothing
+        @constraint(m, model.inequalityConstraints(t, x, u, w) .<= 0)
+    end
+
+    if typeof(model) == LinearDynamicLinearCostSPmodel
+        @objective(m, Min, model.costFunctions(t, x, u, w) + alpha)
+        if ρ > 0.
+            @variable(m, xp[1:nx] == 0)
+            @objective(m, Min, model.costFunctions(t, x, u, w) + alpha +
+                               ρ/2*dot(xf-xp, xf-xp)*param.ρ0)
+        end
+
+    elseif typeof(model) == PiecewiseLinearCostSPmodel
+        @variable(m, cost)
+
+        for i in 1:length(model.costFunctions)
+            @constraint(m, cost >= model.costFunctions[i](t, x, u, w))
+        end
+        @objective(m, Min, cost + alpha)
+        if ρ > 0.
+            xp = @variable(m, xp[1:nx] == model.initialState)
+            @objective(m, Min, cost + alpha + ρ/2*dot(x-xp, x-xp))
+        end
+    end
+    return m
 end
 
 
@@ -366,9 +389,9 @@ vector.
 # Return
 * `Vector{JuMP.Model}`
 """
-function hotstart_SDDP(model::SPModel, param::SDDPparameters, V::Vector{PolyhedralFunction})
+function hotstart_SDDP(model::SPModel, param::SDDPparameters, V::Vector{PolyhedralFunction}; ρk=0.)
 
-    solverProblems = build_models(model, param)
+    solverProblems = build_models(model, param, ρ=ρk)
 
     for t in 1:model.stageNumber-2
         add_cuts_to_model!(model, t, solverProblems[t], V[t+1])
